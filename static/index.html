@@ -12,7 +12,7 @@
     <span class="logo">⌖</span>
     <div>
       <h1>装配尺寸链校验台</h1>
-      <p class="subtitle">差分约束系统 · 负权闭环矛盾定位 · 最紧间隙界判定 · 容差预算 · 名义坐标拟合 · 补测读数窗口 · 垫片组合选配 · 尺寸链改动影响 · 矛盾测量最小撤回 · 测量复核排程 · 目标间隙精度归因（单位：μm）</p>
+      <p class="subtitle">差分约束系统 · 负权闭环矛盾定位 · 最紧间隙界判定 · 容差预算 · 名义坐标拟合 · 补测读数窗口 · 垫片组合选配 · 尺寸链改动影响 · 矛盾测量最小撤回 · 测量复核排程 · 目标间隙精度归因 · 测量缺失合格概率（单位：μm）</p>
     </div>
   </div>
   <div class="examples">
@@ -32,6 +32,7 @@
       <option value="11">示例 11：矛盾测量最小撤回（最少删除）</option>
       <option value="12">示例 12：测量复核排程（最小预期耗时）</option>
       <option value="13">示例 13：目标间隙精度归因（Shapley 分摊）</option>
+      <option value="14">示例 14：测量缺失合格概率（缺测组合精确求和）</option>
     </select>
   </div>
 </header>
@@ -325,6 +326,42 @@
       </div>
       <div class="message" id="attrMessage" hidden></div>
       <div id="attrResult" class="attr-result"></div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-head">
+        <h2>⑮ 测量缺失合格概率</h2>
+        <span class="counter" id="relCounter">0 / 12 已选</span>
+      </div>
+      <p class="hint">选择<b>目标点对</b>与整数<b>合格区间</b>，并从当前清单<b>选取 1～12 条可能缺失的测量</b>，为每条填写<b>独立缺失概率</b>（0～1000 整数，单位 ‰；<b>0‰＝必然有效、1000‰＝必然缺失</b>）。未选取的测量始终有效。对每种缺失组合移除对应测量并重算目标间隙的最紧界，<b>仅当目标有界且整个最紧区间落入合格区间时计为通过</b>；按各组合的独立概率精确求和，以<b>既约分数</b>返回通过 / 未通过概率（沿子集递归树增量更新，不为每种组合重跑全点最短路）。完整清单矛盾时只显示现有负环。点、测量、目标或缺失率变化后旧结果立即撤下。</p>
+      <div class="grid-form">
+        <label>目标起点
+          <select id="rTargetFrom" class="input"></select>
+        </label>
+        <label>目标终点
+          <select id="rTargetTo" class="input"></select>
+        </label>
+        <label>目标下限 μm
+          <input type="number" id="rTargetLow" class="input" step="1">
+        </label>
+        <label>目标上限 μm
+          <input type="number" id="rTargetHigh" class="input" step="1">
+        </label>
+      </div>
+      <div class="table-wrap rel-table-wrap">
+        <table class="data-table" id="relTable">
+          <thead>
+            <tr><th>选取</th><th>编号</th><th>段</th><th>区间 μm</th><th>缺失概率 ‰</th></tr>
+          </thead>
+          <tbody id="relTbody"></tbody>
+        </table>
+        <p class="empty-hint" id="relEmpty">尚未录入约束</p>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="relBtn">计算缺失合格概率</button>
+      </div>
+      <div class="message" id="relMessage" hidden></div>
+      <div id="relResult" class="rel-result"></div>
     </div>
   </section>
 </main>
