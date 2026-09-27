@@ -40,6 +40,13 @@
   |S|!(n−|S|−1)!/n! 把宽度缩减 W(S)−W(S∪{i}) 分摊给各测量，贡献之和恰为
   底座与全量的宽度差；宽度在“终端图”上沿子集递归树增量计算，不枚举排列；
   底座不能给出有界最紧区间时不可归因。
+- 测量缺失合格概率：选取目标点对与 1～12 条可能缺失的测量，各设独立缺失
+  概率（0～1000‰），未选测量始终有效。对全部 2^k 种缺失组合（等价于全部
+  “留存子集”），在“终端图”上沿子集递归树增量加入留存测量的边求目标间隙
+  最紧界（父节点矩阵复制后增量松弛，不为每个子集重跑全点最短路）；仅当
+  目标有界且整个最紧区间落入合格区间时计通过。通过概率为各通过组合概率之
+  和（分母同为 1000^k 的整数加权，再约分为既约分数）；0‰ 与 1000‰ 按确定
+  事件自然处理。
 所有运算均为整数或精确分数，无浮点误差。
 """
 
@@ -1828,5 +1835,198 @@ def precision_attribution(points: list[str], constraints: list[dict],
         "fullWidth": widths[size - 1],
         "widthReduction": width_reduction,
         "contributions": contributions,
+    })
+    return base
+
+
+# ============================ 测量缺失合格概率 ============================
+
+MIN_MISSING = 1
+MAX_MISSING = 12
+MIN_MISSING_PERMILLE = 0
+MAX_MISSING_PERMILLE = 1000
+
+
+def validate_missing_items(constraints: list[dict], raw_items) -> list[dict]:
+    """校验可能缺失的测量选择与缺失概率，返回按录入位置排序的条目列表。
+
+    每条：{"id", "entryIndex"(从 1 起的录入位置), "missingPermille"}。
+    规则：从当前清单选取 1～12 条测量（须已录入、不得重复）；独立缺失概率
+    为 0～1000 的整数（‰）；0 表示该测量必定有效、1000 表示必定缺失。
+    """
+    if not isinstance(raw_items, list):
+        raise ValueError(["items 必须为数组：元素为 {id, missingPermille} 对象"])
+    if not (MIN_MISSING <= len(raw_items) <= MAX_MISSING):
+        raise ValueError([f"可能缺失的测量须选取 {MIN_MISSING}～{MAX_MISSING} 条"
+                          f"（当前 {len(raw_items)} 条）"])
+
+    entry_of = {c["id"]: i + 1 for i, c in enumerate(constraints)}  # 录入位置（1 起）
+    errors: list[str] = []
+    items: list[dict] = []
+    seen: set[str] = set()
+    for k, raw in enumerate(raw_items):
+        prefix = f"缺失条目 {k + 1}"
+        if not isinstance(raw, dict):
+            errors.append(f"{prefix}：格式不是对象")
+            continue
+        cid = raw.get("id")
+        cid = cid.strip() if isinstance(cid, str) else ""
+        if not cid:
+            errors.append(f"{prefix}：编号为空")
+        elif cid not in entry_of:
+            errors.append(f"{prefix}：测量 {cid} 尚未录入")
+        elif cid in seen:
+            errors.append(f"{prefix}：测量 {cid} 重复选取")
+        else:
+            seen.add(cid)
+
+        miss = raw.get("missingPermille")
+        if not isinstance(miss, int) or isinstance(miss, bool):
+            errors.append(f"{prefix}（{cid or '无编号'}）：缺失概率必须为整数（‰）")
+            miss = None
+        elif not MIN_MISSING_PERMILLE <= miss <= MAX_MISSING_PERMILLE:
+            errors.append(f"{prefix}（{cid}）：缺失概率须为 {MIN_MISSING_PERMILLE}～"
+                          f"{MAX_MISSING_PERMILLE}‰（当前 {miss}）")
+            miss = None
+        items.append({"id": cid, "missingPermille": miss})
+    if errors:
+        raise ValueError(errors)
+
+    for it in items:
+        it["entryIndex"] = entry_of[it["id"]]
+    items.sort(key=lambda it: it["entryIndex"])
+    return items
+
+
+def _subset_target_bounds(base_mat: list[list[int | None]], p_loc: int, q_loc: int,
+                          extra: list[list[tuple[int, int, int]]], k: int
+                          ) -> list[tuple[int | None, int | None]]:
+    """全部 2^k 个留存子集下目标点对的最紧间隙上下界（沿子集递归树增量计算）。
+
+    与精度归因共用终端图增量法：base_mat 为底座（未选取、始终有效的测量）
+    全源最短路在终端间的汇总（None 不可达）；extra[b] 为第 b 条可能缺失测量
+    贡献的两条有向边（终端下标）。掩码位为 1 表示该测量留存（有效）、为 0
+    表示缺失。每个节点从父节点矩阵复制后加入一条测量的两条边
+    （_relax_terminal_edge 各 O(|T|²)），整棵树共 2^k 个节点，不为每个子集
+    重跑全点最短路。底座是一致原图的子图，故每个子集均无负环。
+    返回每个掩码下 (下界, 上界)：dist[p][q] 或 dist[q][p] 不可达即该侧为 None。
+    """
+    size = 1 << k
+    bounds: list[tuple[int | None, int | None]] = [(None, None)] * size
+
+    def dfs(mask: int, b0: int, d: list[list[int | None]]) -> None:
+        d_pq = d[p_loc][q_loc]
+        d_qp = d[q_loc][p_loc]
+        bounds[mask] = (None if d_qp is None else -d_qp, d_pq)
+        for b in range(b0, k):
+            d2 = [row[:] for row in d]
+            for u, v, w in extra[b]:
+                _relax_terminal_edge(d2, u, v, w)
+            dfs(mask | (1 << b), b + 1, d2)
+
+    dfs(0, 0, [row[:] for row in base_mat])
+    return bounds
+
+
+def qualification_reliability(points: list[str], constraints: list[dict],
+                              target_from: str, target_to: str,
+                              target_low: int, target_high: int,
+                              items: list[dict]) -> dict:
+    """测量缺失合格概率（仅在原清单一致时调用；矛盾检测由调用方先行完成）。
+
+    选取 k 条（1～12）可能缺失的测量，第 i 条以独立概率 m_i/1000 缺失
+    （0‰ 必有效、1000‰ 必缺失），未选测量始终有效。每种“留存子集” S
+    （掩码位 1 = 留存）对应一种缺失组合，其概率为
+        ∏_{i∈S} (1000−m_i)/1000 · ∏_{i∉S} m_i/1000
+    （各测量缺失相互独立）。对该组合只保留底座（未选测量）与 S 中测量，
+    重算目标点对 target_from → target_to 的间隙最紧界；仅当目标有界且整个
+    最紧区间落入合格区间 [target_low, target_high] 时该组合计为通过
+    （有界但不全落入 = 超差未通过；无界 = 未通过）。通过概率 = 全部通过
+    组合概率的精确求和，未通过概率 = 1 − 通过概率，均以既约分数返回
+    （分母只含因子 2、5，十进制展开有限）；0‰ 与 1000‰ 作为 0/1 因子按
+    确定事件自然处理，无需特殊分支。
+
+    各子集的目标最紧界在终端图上沿子集递归树增量计算（见
+    _subset_target_bounds），不为每种组合重跑全点最短路。
+    """
+    n = len(points)
+    idx = {name: i for i, name in enumerate(points)}
+    p = idx[target_from]
+    q = idx[target_to]
+    selected_ids = [it["id"] for it in items]
+    selected_set = set(selected_ids)
+    base_constraints = [c for c in constraints if c["id"] not in selected_set]
+    selected_constraints = [c for c in constraints if c["id"] in selected_set]  # 录入顺序
+
+    base: dict = {
+        "consistent": True,
+        "points": points,
+        "targetFrom": target_from,
+        "targetTo": target_to,
+        "targetLow": target_low,
+        "targetHigh": target_high,
+        "selectedIds": selected_ids,
+        "items": [
+            {"id": it["id"], "entryIndex": it["entryIndex"],
+             "missingPermille": it["missingPermille"]}
+            for it in items
+        ],
+    }
+
+    # 底座（未选取、始终有效的测量）全源最短路
+    dist0 = all_pairs_shortest(n, build_edges(points, base_constraints))
+
+    # 终端：目标点对 + 各可能缺失测量的端点（去重，保持出现顺序）
+    terminals = [p, q]
+    seen_t = {p, q}
+    for c in selected_constraints:
+        for name in (c["from"], c["to"]):
+            t = idx[name]
+            if t not in seen_t:
+                seen_t.add(t)
+                terminals.append(t)
+    loc = {t: i for i, t in enumerate(terminals)}
+
+    base_mat = [[dist0[u][v] for v in terminals] for u in terminals]
+    extra = []
+    for c in selected_constraints:
+        u = loc[idx[c["from"]]]
+        v = loc[idx[c["to"]]]
+        extra.append([(u, v, c["high"]), (v, u, -c["low"])])
+
+    k = len(selected_constraints)
+    miss = [it["missingPermille"] for it in items]       # 录入顺序 = 位序
+    keep = [1000 - m for m in miss]                      # 留存（有效）概率的千分分子
+    bounds = _subset_target_bounds(base_mat, 0, 1, extra, k)
+
+    # 组合概率以 1000^k 为公分母做整数加权（各因子为 0 或 1000 时自然得到 0/1）
+    size = 1 << k
+    denom = 1000 ** k
+    pass_weight = 0
+    pass_combos = 0
+    unbounded_combos = 0
+    bounded_fail_combos = 0
+    for mask in range(size):
+        weight = 1
+        for i in range(k):
+            weight *= keep[i] if (mask >> i) & 1 else miss[i]
+        low, high = bounds[mask]
+        if low is None or high is None:
+            unbounded_combos += 1
+        elif target_low <= low and high <= target_high:
+            pass_weight += weight
+            pass_combos += 1
+        else:
+            bounded_fail_combos += 1
+
+    pass_fr = Fraction(pass_weight, denom)
+    fail_fr = Fraction(denom - pass_weight, denom)
+    base.update({
+        "totalCombinations": size,
+        "passCombinations": pass_combos,
+        "unboundedCombinations": unbounded_combos,
+        "boundedFailCombinations": bounded_fail_combos,
+        "passProbability": _fraction_payload(pass_fr),
+        "failProbability": _fraction_payload(fail_fr),
     })
     return base

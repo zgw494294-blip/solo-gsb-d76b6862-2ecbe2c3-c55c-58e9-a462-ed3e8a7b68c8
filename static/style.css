@@ -513,6 +513,17 @@ body {
 .attr-plan-table { max-height: 320px; }
 .attr-result td.frac-cell small { color: var(--ink-soft); font-weight: 400; }
 
+/* 测量缺失合格概率 */
+.rel-result { margin-top: 14px; }
+.rel-table-wrap { max-height: 260px; }
+.rel-input { max-width: 100px; padding: 4px 8px; }
+.rel-input.bad { border-color: var(--fail); background: var(--fail-bg); }
+.btn.rel-toggle { padding: 2px 12px; font-size: 11.5px; min-width: 58px; }
+.btn.rel-toggle.on { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn.rel-toggle.on:hover { background: var(--primary-dark); }
+.rel-detail-table { max-height: 320px; }
+.rel-result td.frac-cell small { color: var(--ink-soft); font-weight: 400; }
+
 @media (max-width: 960px) {
   .layout { grid-template-columns: 1fr; }
 }

@@ -37,6 +37,13 @@
                           |S|!(n−|S|−1)!/n! 分摊 W(S)−W(S∪{i})，以既约分数返回
                           各测量贡献，不枚举排列；按贡献降序排名、并列按原录入
                           顺序；返回底座与全量宽度，贡献之和等于宽度差）
+  POST /api/qualification-reliability 测量缺失合格概率（沿用现有点、测量和目标
+                          校验；选取目标点对、整数合格区间与 1～12 条可能缺失的
+                          测量，每条独立缺失概率 0～1000‰，未选测量始终有效，
+                          拒绝重复或未知编号；原清单矛盾时只返回负环；否则对每种
+                          缺失组合增量重算目标间隙最紧界，仅在目标有界且整个区间
+                          落入合格区间时计通过，按组合概率精确求和，以既约分数
+                          返回通过与未通过概率）
 静态：GET /         前端页面（static/index.html）
 """
 
@@ -126,6 +133,17 @@ class PrecisionAttributionIn(BaseModel):
     constraints: list[ConstraintIn]
     target_from: str
     target_to: str
+
+    model_config = {"extra": "ignore"}
+
+
+class QualificationReliabilityIn(BaseModel):
+    points: list[str]
+    constraints: list[ConstraintIn]
+    target_from: str
+    target_to: str
+    target_low: StrictInt
+    target_high: StrictInt
 
     model_config = {"extra": "ignore"}
 
@@ -660,6 +678,69 @@ async def precision_attribution(request: Request):
     return solver.precision_attribution(
         points, constraints,
         model.target_from.strip(), model.target_to.strip(), eval_ids)
+
+
+@app.post("/api/qualification-reliability")
+async def qualification_reliability(request: Request):
+    try:
+        raw = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": ["请求体不是合法的 JSON"]})
+    if not isinstance(raw, dict):
+        return JSONResponse(status_code=400, content={"detail": ["请求体必须是 JSON 对象"]})
+    try:
+        model = QualificationReliabilityIn(**{**_payload(raw),
+                                              "target_from": raw.get("targetFrom"),
+                                              "target_to": raw.get("targetTo"),
+                                              "target_low": raw.get("targetLow"),
+                                              "target_high": raw.get("targetHigh")})
+    except ValidationError as exc:
+        return JSONResponse(status_code=400,
+                            content={"detail": _validation_messages(exc)})
+
+    payload = {
+        "points": model.points,
+        "constraints": [
+            {"id": c.id, "from": c.from_point, "to": c.to_point,
+             "low": c.low, "high": c.high}
+            for c in model.constraints
+        ],
+    }
+    try:
+        points, constraints = solver.validate(payload)
+        items = solver.validate_missing_items(constraints, raw.get("items"))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": list(exc.args[0])})
+
+    # 目标点对存在性、异同与目标区间合法性（沿用查询/补测/垫片接口的校验口径）
+    errors = []
+    if model.target_from.strip() not in points:
+        errors.append(f"目标起点 {model.target_from} 尚未录入")
+    if model.target_to.strip() not in points:
+        errors.append(f"目标终点 {model.target_to} 尚未录入")
+    if model.target_from.strip() and model.target_from.strip() == model.target_to.strip():
+        errors.append("目标点对的两个点必须不同")
+    if model.target_low > model.target_high:
+        errors.append(
+            f"目标合格区间下限 {model.target_low} 大于上限 {model.target_high}")
+    if abs(model.target_low) > solver.LIMIT_RANGE or abs(model.target_high) > solver.LIMIT_RANGE:
+        errors.append(f"目标合格区间上下限须在 ±{solver.LIMIT_RANGE} 以内")
+    if errors:
+        return JSONResponse(status_code=400, content={"detail": errors})
+
+    edges = solver.build_edges(points, constraints)
+    cycle = solver.find_negative_cycle(len(points), edges)
+    if cycle is not None:
+        # 原清单矛盾：只显示现有负环，不计算缺失合格概率
+        return {
+            "consistent": False,
+            "points": points,
+            "contradiction": solver.contradiction_payload(points, edges, cycle),
+        }
+    return solver.qualification_reliability(
+        points, constraints,
+        model.target_from.strip(), model.target_to.strip(),
+        model.target_low, model.target_high, items)
 
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"

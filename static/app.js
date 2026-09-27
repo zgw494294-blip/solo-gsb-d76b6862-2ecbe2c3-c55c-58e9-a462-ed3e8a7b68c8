@@ -177,6 +177,22 @@ const EXAMPLES = {
     attribution: { targetFrom: "A", targetTo: "C", selected: ["M01", "M02", "M03"] },
     query: null,
     autoAttribution: true
+  },
+  "14": {
+    name: "测量缺失合格概率",
+    points: ["A", "B", "C"],
+    constraints: [
+      { id: "M01", from: "A", "to": "B", low: 10, high: 20 },
+      { id: "M02", from: "B", "to": "C", low: 10, high: 20 },
+      { id: "M03", from: "A", "to": "C", low: 35, high: 36 },
+      { id: "M04", from: "B", "to": "C", low: -1000, high: 1000 }
+    ],
+    reliability: {
+      targetFrom: "A", targetTo: "C", targetLow: 20, targetHigh: 40,
+      selected: { M01: "100", M02: "500", M03: "200" }
+    },
+    query: null,
+    autoReliability: true
   }
 };
 
@@ -208,10 +224,13 @@ let state = {
   inspection: null,        // 最近一次复核排程结果（测量或排程参数变化后置空失效）
   attrSelected: {},        // 精度归因：测量编号 -> true（待评估选取，至多 10 条；未选取的固定为底座）
   attribution: null,       // 最近一次精度归因结果（测量、选取或目标点对变化后置空失效）
+  relSelected: {},         // 缺失合格概率：测量编号 -> 缺失概率字符串（0～1000‰，选取至多 12 条；未选取始终有效）
+  reliability: null,       // 最近一次缺失合格概率结果（点、测量、目标或缺失率变化后置空失效）
   query: { from: "", to: "", targetLow: "", targetHigh: "" },
   readingWindow: { from: "", to: "", targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" },
   shimPlan: { targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" },
-  attrTarget: { targetFrom: "", targetTo: "" }
+  attrTarget: { targetFrom: "", targetTo: "" },
+  relTarget: { targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -246,7 +265,9 @@ function persist() {
       inspSelected: state.inspSelected,
       inspParams: state.inspParams,
       attrSelected: state.attrSelected,
-      attrTarget: state.attrTarget
+      attrTarget: state.attrTarget,
+      relSelected: state.relSelected,
+      relTarget: state.relTarget
     }));
   } catch (e) { /* 忽略存储异常 */ }
 }
@@ -261,6 +282,7 @@ function markDirty() {
   state.minRemoval = null; // 点/测量变化后旧最小撤回预览失效
   state.inspection = null; // 测量变化后旧复核排程结果失效
   state.attribution = null; // 点/测量变化后旧精度归因结果失效
+  state.reliability = null; // 点/测量变化后旧缺失合格概率结果失效
   const ids = new Set(state.constraints.map((c) => c.id));
   for (const id of Object.keys(state.steps)) {
     if (!ids.has(id)) delete state.steps[id];   // 清理已删除约束的步长
@@ -276,6 +298,9 @@ function markDirty() {
   }
   for (const id of Object.keys(state.attrSelected)) {
     if (!ids.has(id)) delete state.attrSelected[id];   // 清理已删除约束的归因选取
+  }
+  for (const id of Object.keys(state.relSelected)) {
+    if (!ids.has(id)) delete state.relSelected[id];   // 清理已删除约束的缺失选取
   }
   const pset = new Set(state.points);
   for (const p of Object.keys(state.nominals)) {
@@ -297,6 +322,11 @@ function markDirty() {
       state.attrTarget[key] = "";   // 清理归因目标下拉中已删除的点名
     }
   }
+  for (const key of ["targetFrom", "targetTo"]) {
+    if (state.relTarget[key] && !pset.has(state.relTarget[key])) {
+      state.relTarget[key] = "";   // 清理缺失概率目标下拉中已删除的点名
+    }
+  }
   persist();
   renderResults();
   renderSimplify();
@@ -308,6 +338,7 @@ function markDirty() {
   renderMinRemoval();
   renderInspection();
   renderAttribution();
+  renderReliability();
 }
 async function postJSON(url, body) {
   const resp = await fetch(url, {
@@ -418,6 +449,15 @@ function showAttrError(msg) {
     : esc(msg);
 }
 function clearAttrMessage() { $("attrMessage").hidden = true; }
+function showRelError(msg) {
+  const box = $("relMessage");
+  box.hidden = false;
+  box.className = "message error";
+  box.innerHTML = Array.isArray(msg)
+    ? "<ul>" + msg.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>"
+    : esc(msg);
+}
+function clearRelMessage() { $("relMessage").hidden = true; }
 
 /* ---------------- 渲染：基准点 ---------------- */
 function renderPoints() {
@@ -452,6 +492,8 @@ function syncSelects() {
   fillSelect($("sTargetTo"), state.points, state.shimPlan.targetTo);
   fillSelect($("aTargetFrom"), state.points, state.attrTarget.targetFrom);
   fillSelect($("aTargetTo"), state.points, state.attrTarget.targetTo);
+  fillSelect($("rTargetFrom"), state.points, state.relTarget.targetFrom);
+  fillSelect($("rTargetTo"), state.points, state.relTarget.targetTo);
   const setIfEmpty = (sel, preferred) => {
     if (!sel.value && preferred !== undefined) sel.value = preferred;
   };
@@ -463,6 +505,8 @@ function syncSelects() {
   setIfEmpty($("sTargetTo"), state.points[1]);
   setIfEmpty($("aTargetFrom"), state.points[0]);
   setIfEmpty($("aTargetTo"), state.points[1]);
+  setIfEmpty($("rTargetFrom"), state.points[0]);
+  setIfEmpty($("rTargetTo"), state.points[1]);
 }
 
 /* ---------------- 渲染：约束表 ---------------- */
@@ -501,6 +545,7 @@ function renderAll() {
   renderMinRemoval();
   renderInspection();
   renderAttribution();
+  renderReliability();
 }
 
 /* ---------------- 结果区 ---------------- */
@@ -1980,6 +2025,144 @@ async function runAttribution() {
   renderAttributionResult();
 }
 
+/* ---------------- 测量缺失合格概率 ---------------- */
+function relSelectedCount() {
+  return state.constraints.filter((c) => state.relSelected[c.id] !== undefined).length;
+}
+
+function renderReliabilityTable() {
+  const tbody = $("relTbody");
+  const has = state.constraints.length > 0;
+  $("relEmpty").style.display = has ? "none" : "block";
+  $("relTable").style.display = has ? "" : "none";
+  $("relCounter").textContent = `${relSelectedCount()} / 12 可能缺失`;
+  if (!has) { tbody.innerHTML = ""; return; }
+  tbody.innerHTML = state.constraints.map((c, idx) => {
+    const sel = state.relSelected[c.id] !== undefined;
+    const raw = sel ? String(state.relSelected[c.id]) : "";
+    const v = parseIntStrict(raw);
+    const bad = sel && (v === null || v < 0 || v > 1000);
+    return `<tr>
+      <td><button class="btn tiny rel-toggle${sel ? " on" : ""}" data-rel-toggle="${esc(c.id)}"
+        >${sel ? "已选" : "选取"}</button></td>
+      <td>${esc(c.id)}<small class="insp-entry">#${idx + 1}</small></td>
+      <td>${esc(c.from)} → ${esc(c.to)}</td>
+      <td class="num">[ ${c.low} , ${c.high} ]</td>
+      <td><input type="number" class="input rel-input${bad ? " bad" : ""}"
+           data-rel-for="${esc(c.id)}" min="0" max="1000" step="1"
+           value="${esc(raw)}"${sel ? "" : " disabled"} placeholder="0～1000"></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderReliabilityResult() {
+  const box = $("relResult");
+  const r = state.reliability;
+  if (!r) { box.innerHTML = ""; return; }
+  const p = r.passProbability, f = r.failProbability;
+  const pText = fmtFraction(p) + (p.den === "1" ? "" : ` = ${p.decimal}`);
+  const fText = fmtFraction(f) + (f.den === "1" ? "" : ` = ${f.decimal}`);
+  const pct = (permille) => {
+    const v = Math.round(((1000 - permille) / 10) * 100) / 100;
+    return `${v}%`;
+  };
+  const rows = r.items.map((it) => `<tr>
+      <td>${esc(it.id)}</td>
+      <td class="num">${it.entryIndex}</td>
+      <td class="num">${it.missingPermille}‰</td>
+      <td class="num">${pct(it.missingPermille)}</td>
+    </tr>`).join("");
+  box.innerHTML = `
+    <div class="verdict-banner pass"><span class="icon">✓</span>
+      <div>合格概率 <b>${esc(pText)}</b>　未通过概率 <b>${esc(fText)}</b>
+      <span class="sub">枚举全部 ${r.totalCombinations} 种缺失组合（各测量以其缺失概率独立缺失），仅当 ${esc(r.targetFrom)} → ${esc(r.targetTo)} 的最紧间隙<b>有界</b>且整个区间完全落入 [ ${r.targetLow} , ${r.targetHigh} ] μm 时计为通过；概率按组合精确求和后约分为既约分数。</span></div>
+    </div>
+    <dl class="kv">
+      <dt>目标点对 / 合格区间</dt><dd>${esc(r.targetFrom)} → ${esc(r.targetTo)}，[ ${r.targetLow} , ${r.targetHigh} ] μm</dd>
+      <dt>通过组合数</dt><dd>${r.passCombinations} / ${r.totalCombinations}</dd>
+      <dt>无界（未通过）组合数</dt><dd>${r.unboundedCombinations} / ${r.totalCombinations}</dd>
+      <dt>有界但未全落入（超差）组合数</dt><dd>${r.boundedFailCombinations} / ${r.totalCombinations}</dd>
+    </dl>
+    <div class="table-wrap rel-detail-table">
+      <table class="data-table">
+        <thead><tr><th>编号</th><th>录入位置</th><th>缺失概率</th><th>有效概率</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderReliability() {
+  renderReliabilityTable();
+  renderReliabilityResult();
+}
+
+async function runReliability() {
+  clearRelMessage();
+  if (state.points.length < 2) return showRelError("请先录入至少 2 个基准点。");
+  if (state.constraints.length < 1) return showRelError("请至少录入 1 条测量约束。");
+  const targetFrom = $("rTargetFrom").value, targetTo = $("rTargetTo").value;
+  const targetLow = parseIntStrict($("rTargetLow").value);
+  const targetHigh = parseIntStrict($("rTargetHigh").value);
+  const errors = [];
+  if (!targetFrom) errors.push("请选择目标起点。");
+  if (!targetTo) errors.push("请选择目标终点。");
+  if (targetFrom && targetTo && targetFrom === targetTo) errors.push("目标点对的两个点必须不同。");
+  if (targetLow === null) errors.push("目标下限必须为整数。");
+  if (targetHigh === null) errors.push("目标上限必须为整数。");
+  if (targetLow !== null && Math.abs(targetLow) > 1e9) errors.push("目标下限超出 ±1000000000。");
+  if (targetHigh !== null && Math.abs(targetHigh) > 1e9) errors.push("目标上限超出 ±1000000000。");
+  if (targetLow !== null && targetHigh !== null && targetLow > targetHigh) {
+    errors.push(`目标下限 ${targetLow} 不能大于上限 ${targetHigh}。`);
+  }
+  const ids = state.constraints.filter((c) => state.relSelected[c.id] !== undefined).map((c) => c.id);
+  if (!ids.length) errors.push("请至少选取 1 条可能缺失的测量。");
+  if (ids.length > 12) errors.push("可能缺失的测量至多选取 12 条。");
+  const items = [];
+  for (const id of ids) {
+    const v = parseIntStrict(state.relSelected[id]);
+    if (v === null) errors.push(`测量 ${id}：缺失概率必须为整数（‰）。`);
+    else if (v < 0 || v > 1000) errors.push(`测量 ${id}：缺失概率须为 0～1000‰（当前 ${v}）。`);
+    else items.push({ id, missingPermille: v });
+  }
+  if (errors.length) return showRelError(errors);
+
+  state.relTarget = {
+    targetFrom, targetTo,
+    targetLow: $("rTargetLow").value.trim(),
+    targetHigh: $("rTargetHigh").value.trim()
+  };
+  persist();
+
+  const btn = $("relBtn");
+  btn.disabled = true;
+  btn.textContent = "计算中…";
+  const { ok, data } = await postJSON("/api/qualification-reliability", {
+    points: state.points,
+    constraints: state.constraints,
+    targetFrom, targetTo, targetLow, targetHigh,
+    items
+  });
+  btn.disabled = false;
+  btn.textContent = "计算缺失合格概率";
+  if (!ok) {
+    state.reliability = null;
+    renderReliabilityResult();
+    return showRelError(data && data.detail ? data.detail : "缺失合格概率请求失败。");
+  }
+  if (!data.consistent) {
+    // 原清单矛盾：只显示现有负环，不计算缺失合格概率
+    state.reliability = null;
+    state.analysis = data;
+    renderResults();
+    renderReliabilityResult();
+    return showRelError("当前约束存在矛盾闭环，系统只显示负环证据，不计算缺失合格概率，请先消除矛盾。");
+  }
+  state.analysis = { consistent: true, points: state.points };
+  state.reliability = data;
+  renderResults();
+  renderReliabilityResult();
+}
+
 /* ---------------- 示例 ---------------- */
 async function loadExample(key) {
   const ex = EXAMPLES[key];
@@ -2006,8 +2189,11 @@ async function loadExample(key) {
   state.minRemoval = null;
   state.inspection = null;
   state.attribution = null;
+  state.reliability = null;
   state.attrSelected = {};
   state.attrTarget = { targetFrom: "", targetTo: "" };
+  state.relSelected = {};
+  state.relTarget = { targetFrom: "", targetTo: "", targetLow: "", targetHigh: "" };
   state.removable = {};
   if (ex.removable) for (const id of ex.removable) state.removable[id] = true;
   state.inspSelected = {};
@@ -2032,6 +2218,17 @@ async function loadExample(key) {
     };
     for (const id of ex.attribution.selected) state.attrSelected[id] = true;
   }
+  if (ex.reliability) {
+    state.relTarget = {
+      targetFrom: ex.reliability.targetFrom,
+      targetTo: ex.reliability.targetTo,
+      targetLow: String(ex.reliability.targetLow),
+      targetHigh: String(ex.reliability.targetHigh)
+    };
+    for (const id of Object.keys(ex.reliability.selected)) {
+      state.relSelected[id] = ex.reliability.selected[id];
+    }
+  }
   renderSimplify();
   renderTolerance();
   renderFit();
@@ -2041,6 +2238,7 @@ async function loadExample(key) {
   renderMinRemoval();
   renderInspection();
   renderAttribution();
+  renderReliability();
   clearSimplifyMessage();
   clearToleranceMessage();
   clearFitMessage();
@@ -2048,6 +2246,7 @@ async function loadExample(key) {
   clearMinRemovalMessage();
   clearInspMessage();
   clearAttrMessage();
+  clearRelMessage();
   resetConstraintForm();
   if (ex.query) {
     state.query = { ...ex.query };
@@ -2063,6 +2262,10 @@ async function loadExample(key) {
     state.shimPlan = { ...ex.shimPlan };
     $("sTargetLow").value = ex.shimPlan.targetLow;
     $("sTargetHigh").value = ex.shimPlan.targetHigh;
+  }
+  if (ex.reliability) {
+    $("rTargetLow").value = ex.reliability.targetLow;
+    $("rTargetHigh").value = ex.reliability.targetHigh;
   }
   persist();
   renderAll();
@@ -2107,6 +2310,11 @@ async function loadExample(key) {
     $("aTargetTo").value = ex.attribution.targetTo;
     await runAttribution();
   }
+  if (ex.autoReliability && state.analysis && state.analysis.consistent) {
+    $("rTargetFrom").value = ex.reliability.targetFrom;
+    $("rTargetTo").value = ex.reliability.targetTo;
+    await runReliability();
+  }
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -2143,6 +2351,17 @@ function init() {
         targetTo: saved.attrTarget.targetTo || ""
       };
     }
+    if (saved.relSelected && typeof saved.relSelected === "object") {
+      state.relSelected = saved.relSelected;
+    }
+    if (saved.relTarget && typeof saved.relTarget === "object") {
+      state.relTarget = {
+        targetFrom: saved.relTarget.targetFrom || "",
+        targetTo: saved.relTarget.targetTo || "",
+        targetLow: saved.relTarget.targetLow || "",
+        targetHigh: saved.relTarget.targetHigh || ""
+      };
+    }
     if (Array.isArray(saved.positions)) {
       state.positions = saved.positions
         .filter((p) => p && (p.direction === 1 || p.direction === -1) && Array.isArray(p.options))
@@ -2168,6 +2387,10 @@ function init() {
   if (state.shimPlan.targetLow !== undefined) {
     $("sTargetLow").value = state.shimPlan.targetLow;
     $("sTargetHigh").value = state.shimPlan.targetHigh;
+  }
+  if (state.relTarget.targetLow !== undefined) {
+    $("rTargetLow").value = state.relTarget.targetLow;
+    $("rTargetHigh").value = state.relTarget.targetHigh;
   }
   renderAll();
 
@@ -2200,6 +2423,56 @@ function init() {
   $("minRemovalBtn").addEventListener("click", runMinRemoval);
   $("inspBtn").addEventListener("click", runInspection);
   $("attrBtn").addEventListener("click", runAttribution);
+  $("relBtn").addEventListener("click", runReliability);
+  $("relTbody").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-rel-toggle]");
+    if (!btn) return;
+    const id = btn.dataset.relToggle;
+    if (state.relSelected[id] !== undefined) {
+      delete state.relSelected[id];
+    } else {
+      if (relSelectedCount() >= 12) {
+        showRelError("可能缺失的测量至多选取 12 条；请先取消其他测量的选取。");
+        return;
+      }
+      state.relSelected[id] = "100";
+    }
+    // 选取变化后旧结果立即撤下
+    state.reliability = null;
+    clearRelMessage();
+    persist();
+    renderReliability();
+  });
+  $("relTbody").addEventListener("input", (e) => {
+    const inp = e.target.closest("input[data-rel-for]");
+    if (!inp) return;
+    const id = inp.dataset.relFor;
+    const raw = inp.value;
+    state.relSelected[id] = raw;
+    const v = parseIntStrict(raw);
+    inp.classList.toggle("bad", v === null || v < 0 || v > 1000);
+    // 缺失率变化后旧结果立即撤下
+    state.reliability = null;
+    clearRelMessage();
+    persist();
+    renderReliabilityResult();
+  });
+  // 目标点对或合格区间变化后立即撤下旧缺失概率结果
+  ["rTargetFrom", "rTargetTo"].forEach((id) =>
+    $(id).addEventListener("change", () => {
+      state.relTarget.targetFrom = $("rTargetFrom").value;
+      state.relTarget.targetTo = $("rTargetTo").value;
+      state.reliability = null;
+      clearRelMessage();
+      persist();
+      renderReliabilityResult();
+    }));
+  ["rTargetLow", "rTargetHigh"].forEach((id) =>
+    $(id).addEventListener("input", () => {
+      state.reliability = null;
+      clearRelMessage();
+      renderReliabilityResult();
+    }));
   $("attrTbody").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-attr-toggle]");
     if (!btn) return;
@@ -2446,6 +2719,16 @@ function init() {
   };
   ["sTargetFrom", "sTargetTo", "sTargetLow", "sTargetHigh"].forEach((id) =>
     $(id).addEventListener("change", saveShimForm));
+
+  const saveRelForm = () => {
+    state.relTarget.targetFrom = $("rTargetFrom").value;
+    state.relTarget.targetTo = $("rTargetTo").value;
+    state.relTarget.targetLow = $("rTargetLow").value.trim();
+    state.relTarget.targetHigh = $("rTargetHigh").value.trim();
+    persist();
+  };
+  ["rTargetFrom", "rTargetTo", "rTargetLow", "rTargetHigh"].forEach((id) =>
+    $(id).addEventListener("change", saveRelForm));
 }
 
 document.addEventListener("DOMContentLoaded", init);
